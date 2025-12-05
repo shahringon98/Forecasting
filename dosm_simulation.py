@@ -1,4 +1,3 @@
-!pip install streamlit --upgrade
 
 import streamlit as st
 import numpy as np
@@ -11,8 +10,6 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from datetime import datetime
-import hashlib
-import requests
 warnings.filterwarnings('ignore')
 
 # =============================================================================
@@ -22,11 +19,8 @@ warnings.filterwarnings('ignore')
 @dataclass
 class ForecastConfig:
     """Configuration with enhanced parameters"""
-    # Statistical
     statistical_order: Tuple[int, int, int] = (1, 1, 1)
-
-    # Deep Learning (LSTM + Transformer options)
-    dl_architecture: str = "transformer"  # "lstm" or "transformer"
+    dl_architecture: str = "transformer"
     lookback: int = 36
     hidden_size: int = 128
     num_layers: int = 3
@@ -34,30 +28,20 @@ class ForecastConfig:
     epochs: int = 100
     learning_rate: float = 0.001
     early_stopping_patience: int = 10
-
-    # LLM
     llm_model: str = "gpt-3.5-turbo"
     api_key: Optional[str] = None
     max_tokens: int = 300
     temperature: float = 0.2
     use_rag: bool = True
-
-    # RAG Enhancement
     rag_top_k: int = 10
     rag_hybrid_weight: float = 0.5
     rag_semantic_model: str = "all-mpnet-base-v2"
-
-    # Meta-controller
     window_size: int = 50
     alpha: float = 2.5
     guardrail_threshold: float = 0.4
     uncertainty_weighting: bool = True
-
-    # Federated Learning
     fedprox_mu: float = 0.01
     client_epochs: int = 5
-
-    # Robustness
     adversarial_training: bool = False
     epsilon_adv: float = 0.1
 
@@ -202,7 +186,8 @@ class EnhancedDLForecaster:
 
         best_loss = np.inf
         patience_counter = 0
-        progress_bar = st.progress(0)
+        # Removed the progress bar from this section as it causes issues in non-interactive environments
+        # progress_bar = st.progress(0)
 
         for epoch in range(self.config.epochs):
             optimizer.zero_grad()
@@ -229,7 +214,8 @@ class EnhancedDLForecaster:
                 if patience_counter >= self.config.early_stopping_patience:
                     break
 
-            progress_bar.progress((epoch + 1) / self.config.epochs)
+            # Removed the progress bar update
+            # progress_bar.progress((epoch + 1) / self.config.epochs)
 
         return self
 
@@ -349,7 +335,7 @@ class EnhancedLLMForecaster:
         recent_values = y[-20:].tolist()
         prompt = f"""Forecast next {steps} values for: {recent_values}
 
-Return JSON: {{\"forecast\": [...], \"reasoning\": \"...\", \"confidence\": 0.0-1.0}}
+Return JSON: {{"forecast": [...], "reasoning": "...", "confidence": 0.0-1.0}}
 Context: {context or "No additional context"}
 Evidence: {retrieved_docs[:3] if retrieved_docs else "None"}
 Reliability: {[rel for rel in reliability[:3]]}"""
@@ -568,7 +554,7 @@ class EnhancedREHFF:
         }
 
     def update_with_new_data(self, y_new: float, exog_new: Optional[np.ndarray] = None):
-        if self.history is not None:
+        if self.history is None:
             self.history = np.append(self.history, y_new)
             if self.exog_history is not None and exog_new is not None:
                 self.exog_history = np.vstack([self.exog_history, exog_new])
@@ -906,3 +892,64 @@ class DOSMSimulation:
                 - Total samples: {result['total_samples']}
                 - States: {', '.join(result['client_ids'])}
                 """)
+
+# =============================================================================
+# MAIN DOSM SIMULATION APP
+# =============================================================================
+
+def main():
+    st.set_page_config(page_title="REHFF DOSM Simulation", layout="wide")
+    st.title("🏰 REHFF: DOSM Real Data Simulation")
+    st.markdown("""
+    **Forecasting Malaysia's Consumer Price Index using Department of Statistics Malaysia (DOSM) Open Data**
+    """)
+
+    with st.sidebar:
+        st.header("📐️ Simulation Settings")
+
+        state = st.selectbox(
+            "Select Malaysian State",
+            ["Malaysia", "Selangor", "Johor", "Kedah", "Sabah", "Sarawak", "Penang"]
+        )
+
+        forecast_horizon = st.slider("Forecast Horizon (months)", 1, 12, 3)
+
+        st.markdown("---")
+        st.info("""
+        **Data Sources:**
+        - CPI: DOSM Open Data Portal
+        - Oil Prices: Synthetic proxy
+        - Exchange Rates: Synthetic proxy
+        - Policy Events: Handcrafted
+        """)
+
+    config = ForecastConfig(
+        dl_architecture="transformer",
+        window_size=50,
+        alpha=2.5,
+        guardrail_threshold=0.4,
+        epochs=100,
+        use_rag=True,
+        uncertainty_weighting=True,
+        lookback=36
+    )
+
+    if st.button("🚀 Start DOSM Simulation", type="primary", use_container_width=True):
+        simulator = DOSMSimulation(config)
+        results = simulator.run_comprehensive_simulation(state=state)
+
+        results_df = pd.DataFrame({
+            'date': results['dates'],
+            'actual_cpi': results['actuals'],
+            'forecast_cpi': results['predictions']
+        })
+
+        st.download_button(
+            label="📥 Download Forecast Results (CSV)",
+            data=results_df.to_csv(index=False),
+            file_name=f"rehff_dosm_forecast_{state}_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv"
+        )
+
+if __name__ == "__main__":
+    main()
