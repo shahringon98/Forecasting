@@ -8,3 +8,4 @@ rank_bm25
 openai
 scikit-learn
 torch
+seaborn
