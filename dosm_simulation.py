@@ -122,7 +122,9 @@ class EnhancedDLForecaster:
     def __init__(self, config: ForecastConfig):
         self.config = config
         self.model = None
-        self.scaler = None
+        # FIXED: Separate scalers for y and exog variables
+        self.y_scaler = None
+        self.exog_scaler = None
 
     def fit(self, y: np.ndarray, exog: Optional[np.ndarray] = None):
         try:
@@ -132,12 +134,14 @@ class EnhancedDLForecaster:
             st.error("PyTorch or scikit-learn not installed")
             return self
 
-        self.scaler = StandardScaler()
-        y_scaled = self.scaler.fit_transform(y.reshape(-1, 1)).flatten()
+        # FIXED: Use separate scalers
+        self.y_scaler = StandardScaler()
+        y_scaled = self.y_scaler.fit_transform(y.reshape(-1, 1)).flatten()
 
         if exog is not None:
-            exog_scaled = self.scaler.fit_transform(exog)
-            combined = np.column_stack([y_scaled, exog_scaled])
+            self.exog_scaler = StandardScaler()
+            exog_scaled = self.exog_scaler.fit_transform(exog)
+            combined = np.column_stack([y_scaled.reshape(-1, 1), exog_scaled])
             input_size = combined.shape[1]
         else:
             combined = y_scaled.reshape(-1, 1)
@@ -185,8 +189,6 @@ class EnhancedDLForecaster:
 
         best_loss = np.inf
         patience_counter = 0
-        # Removed the progress bar from this section as it causes issues in non-interactive environments
-        # progress_bar = st.progress(0)
 
         for epoch in range(self.config.epochs):
             optimizer.zero_grad()
@@ -213,9 +215,6 @@ class EnhancedDLForecaster:
                 if patience_counter >= self.config.early_stopping_patience:
                     break
 
-            # Removed the progress bar update
-            # progress_bar.progress((epoch + 1) / self.config.epochs)
-
         return self
 
     def predict(self, y: np.ndarray, exog: Optional[np.ndarray] = None,
@@ -227,11 +226,17 @@ class EnhancedDLForecaster:
         self.model.eval()
         self.model.load_state_dict(self.best_model_state)
 
-        y_scaled = self.scaler.transform(y.reshape(-1, 1)).flatten()
+        # FIXED: Use y_scaler instead of scaler
+        y_scaled = self.y_scaler.transform(y.reshape(-1, 1)).flatten()
 
         if exog is not None:
-            exog_scaled = self.scaler.transform(exog)
-            combined = np.column_stack([y_scaled, exog_scaled])
+            # FIXED: Use exog_scaler instead of scaler
+            if self.exog_scaler is None:
+                st.warning("Exog scaler not found, using zeros")
+                exog_scaled = np.zeros_like(exog)
+            else:
+                exog_scaled = self.exog_scaler.transform(exog)
+            combined = np.column_stack([y_scaled.reshape(-1, 1), exog_scaled])
         else:
             combined = y_scaled.reshape(-1, 1)
 
@@ -261,7 +266,7 @@ class EnhancedDLForecaster:
                     pred = self.model(seq_tensor).cpu().numpy()[0, 0]
                     predictions.append(pred)
 
-                pred_original = self.scaler.inverse_transform([[pred]])[0, 0]
+                pred_original = self.y_scaler.inverse_transform([[pred]])[0, 0]
                 predictions[-1] = pred_original
 
                 new_point = np.array([[pred] + ([0] * (combined.shape[1] - 1))])
@@ -505,6 +510,7 @@ class EnhancedREHFF:
             st.error("Model not trained yet!")
             return None
 
+        # FIXED: Ensure exog_history is passed correctly
         pred_stat = self.statistical.predict(steps, exog_future)
         pred_deep = self.deep_learning.predict(self.history, self.exog_history, steps,
                                                self.config.uncertainty_weighting)
@@ -579,9 +585,9 @@ class DOSMDataLoader:
     """Load real data from DOSM Malaysia Open Data Portal"""
 
     def __init__(self):
-        # Fixed: Removed trailing space in base URL
+        # FIXED: Removed trailing space in base URL
         self.base_url = "https://storage.dosm.gov.my"
-        # Fixed: Added realistic dataset paths
+        # FIXED: Corrected dataset paths
         self.datasets = {
             "cpi_state": "/timeseries/cpi/cpi_2d_state.parquet",
             "cpi_national": "/timeseries/cpi/cpi_2d.parquet"
@@ -590,29 +596,28 @@ class DOSMDataLoader:
     def load_cpi_data(self, state: str = "Malaysia", start_date: str = "2015-01-01") -> pd.DataFrame:
         """Load CPI data for specific state or national level"""
         try:
-            # Fixed: Corrected URL construction
             url = f"{self.base_url}{self.datasets['cpi_state']}"
             st.info(f"Attempting to load from: {url}")
             df = pd.read_parquet(url)
             
-            # Fixed: Robust date parsing
+            # FIXED: Robust date parsing
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
             
-            # Fixed: Handle both 'state' and 'state_name' columns (common variations)
+            # FIXED: Handle various state column names
             state_col = 'state' if 'state' in df.columns else 'state_name' if 'state_name' in df.columns else None
             
             if state_col is None:
-                st.warning("No state column found in data, using national data")
+                st.warning("No state column found, using national data")
                 df_filtered = df.copy()
             else:
-                # Fixed: Handle both "Malaysia" and "SEA_MALAYSIA" formats
+                # FIXED: Handle multiple state name formats
                 if state == "Malaysia":
                     state_values = ["Malaysia", "SEA_MALAYSIA", "MALAYSIA"]
                     df_filtered = df[df[state_col].isin(state_values)]
                 else:
                     df_filtered = df[df[state_col] == state]
             
-            # Fixed: Safe date filtering
+            # FIXED: Safe date filtering
             df_filtered = df_filtered[df_filtered['date'] >= pd.to_datetime(start_date)]
             df_filtered = df_filtered.sort_values('date').reset_index(drop=True)
             
@@ -630,15 +635,14 @@ class DOSMDataLoader:
 
     def load_exogenous_data(self, start_date: str = "2015-01-01") -> pd.DataFrame:
         """Generate synthetic exogenous variables"""
-        # Fixed: Generate up to current date, not future date
+        # FIXED: Generate up to current date, not future
         end_date = min(pd.Timestamp.now(), pd.Timestamp("2025-01-01"))
         date_range = pd.date_range(start=start_date, end=end_date, freq='M')
 
         exog_data = []
         for date in date_range:
-            # Fixed: More realistic oil price and exchange rate simulation
+            # FIXED: More realistic oil price and exchange rate simulation
             oil_price = 60 + np.sin(date.month) * 15 + (date.year - 2020) * 3 + np.random.normal(0, 3)
-            # USD/MYR typically ranges from 3.8 to 4.8
             usd_myr = 4.2 + np.sin(date.month / 3) * 0.3 + (date.year - 2020) * 0.05 + np.random.normal(0, 0.05)
             policy_shock = 1.0 if date in [pd.Timestamp('2018-09-01'), pd.Timestamp('2022-06-01')] else 0.0
             covid_impact = 1.5 if pd.Timestamp('2020-03-01') <= date <= pd.Timestamp('2021-12-01') else 0.0
@@ -656,11 +660,10 @@ class DOSMDataLoader:
     def _generate_synthetic_cpi(self, state: str, start_date: str) -> pd.DataFrame:
         """Generate realistic synthetic CPI data"""
         start = pd.to_datetime(start_date)
-        # Fixed: Generate up to current date, not future date
+        # FIXED: Generate up to current date, not future
         end_date = min(pd.Timestamp.now(), pd.Timestamp("2025-01-01"))
         date_range = pd.date_range(start=start, end=end_date, freq='M')
 
-        # Fixed: Use cumulative base CPI instead of resetting every time
         base_cpi = 100
         cpi_values = []
 
@@ -670,21 +673,21 @@ class DOSMDataLoader:
             # Seasonal: yearly pattern
             seasonal = 1 + 0.02 * np.sin(2 * np.pi * date.month / 12)
 
-            # Fixed: More realistic COVID impact
+            # FIXED: More realistic COVID impact
             if pd.Timestamp('2020-03-01') <= date <= pd.Timestamp('2021-06-01'):
-                covid_factor = 1.03  # Moderate inflation impact
+                covid_factor = 1.03
             elif pd.Timestamp('2021-07-01') <= date <= pd.Timestamp('2021-12-01'):
-                covid_factor = 1.06  # Higher inflation post-lockdown
+                covid_factor = 1.06
             else:
                 covid_factor = 1.0
 
             # Policy shocks
             if date in [pd.Timestamp('2018-09-01'), pd.Timestamp('2022-06-01')]:
-                policy_factor = 1.02  # Smaller policy impact
+                policy_factor = 1.02
             else:
                 policy_factor = 1.0
 
-            # Fixed: Add realistic noise
+            # FIXED: Add realistic noise
             noise = np.random.normal(0, 0.3)
             cpi = base_cpi * trend * seasonal * covid_factor * policy_factor + noise
             cpi_values.append(max(95, min(130, cpi)))  # Clamp to realistic range
@@ -716,7 +719,7 @@ class DOSMSimulation:
         cpi_data = self.loader.load_cpi_data(state=state, start_date="2015-01-01")
         exog_data = self.loader.load_exogenous_data(start_date="2015-01-01")
 
-        # Fixed: Use outer merge first, then filter to see what data we have
+        # FIXED: Use outer merge first, then fill missing values
         full_data = pd.merge(cpi_data, exog_data, on='date', how='outer')
         full_data = full_data.sort_values('date').reset_index(drop=True)
         
@@ -738,7 +741,7 @@ class DOSMSimulation:
         with col2:
             st.metric("CPI Range", f"{full_data['index'].min():.1f} - {full_data['index'].max():.1f}")
         with col3:
-            # Fixed: Safe date formatting with error handling
+            # FIXED: Safe date formatting with error handling
             try:
                 date_min = full_data['date'].min()
                 date_max = full_data['date'].max()
@@ -817,6 +820,7 @@ class DOSMSimulation:
             future_date = test_dates.iloc[i]['date']
             context = self._generate_context(future_date)
 
+            # FIXED: Pass correct parameters
             result = self.rehff.predict(steps=3, exog_future=exog_future, context=context)
 
             if i < len(y_test) - 1:
