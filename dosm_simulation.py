@@ -1,3 +1,4 @@
+pip install streamlit pandas numpy matplotlib statsmodels scikit-learn torch sentence-transformers rank_bm25 openai
 
 import streamlit as st
 import numpy as np
@@ -953,3 +954,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
