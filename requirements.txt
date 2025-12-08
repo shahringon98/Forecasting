@@ -9,3 +9,4 @@ openai
 scikit-learn
 torch
 seaborn
+plotly.graph_objects
