@@ -8,14 +8,3 @@ rank_bm25
 openai
 scikit-learn
 torch
-seaborn
-json
-typing
-warnings
-dataclasses
-pathlib
-datetime
-enum
-plotly.graph_objects
-io
-base64
