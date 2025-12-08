@@ -1,12 +1,28 @@
-streamlit
-pandas
-numpy
-matplotlib
-statsmodels
-sentence-transformers
-rank_bm25
-openai
-scikit-learn
-torch
-seaborn
-plotly.graph_objects
+# Core scientific computing
+numpy==1.24.3
+pandas==2.1.4
+scipy==1.11.4
+scikit-learn==1.3.2
+
+# Statistical modeling
+statsmodels==0.14.0
+
+# Visualization
+matplotlib==3.8.2
+plotly==5.18.0
+seaborn==0.13.0
+
+# Streamlit
+streamlit==1.29.0
+
+# Deep Learning - CPU version for Streamlit Cloud
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.1.0+cpu
+torchvision==0.16.0+cpu
+
+# LLM & NLP
+openai==1.3.7
+rank-bm25==0.2.2
+
+# Optional: Uncomment if you need advanced semantic search
+# sentence-transformers==2.2.2
