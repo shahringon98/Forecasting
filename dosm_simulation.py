@@ -8,14 +8,14 @@ from typing import List, Dict, Optional, Tuple, Any
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-import torch
-import torch.nn as nn
 from datetime import datetime, timedelta
 from enum import Enum
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import io
 import base64
+import torch
+import torch.nn as nn
 
 warnings.filterwarnings('ignore')
 
@@ -38,12 +38,12 @@ class ForecastConfig:
     seasonal_order: Optional[Tuple[int, int, int, int]] = None
     
     # Deep Learning Architecture
-    dl_architecture: str = "transformer"  # "transformer" or "lstm"
+    dl_architecture: str = "transformer"
     lookback: int = 36
     hidden_size: int = 128
     num_layers: int = 3
     dropout: float = 0.3
-    nhead: int = 8  # for transformer
+    nhead: int = 8
     
     # Training
     epochs: int = 100
@@ -62,7 +62,6 @@ class ForecastConfig:
     rag_top_k: int = 10
     rag_hybrid_weight: float = 0.5
     rag_semantic_model: str = "all-mpnet-base-v2"
-    rag_corpus_path: Optional[str] = None
     
     # Fusion & Weighting
     window_size: int = 50
@@ -77,11 +76,6 @@ class ForecastConfig:
     # Robustness
     adversarial_training: bool = False
     epsilon_adv: float = 0.1
-    feature_noise: float = 0.0
-    
-    # Validation
-    test_size: int = 24
-    validation_split: float = 0.1
     
     # Output
     forecast_horizon: int = 3
@@ -93,7 +87,6 @@ class ForecastConfig:
         assert self.hidden_size > 0, "Hidden size must be positive"
         assert 0 <= self.dropout <= 1, "Dropout must be in [0, 1]"
         assert 0 <= self.temperature <= 2, "Temperature must be in [0, 2]"
-        assert 0 <= self.guardrail_threshold <= 1, "Guardrail must be in [0, 1]"
 
 class DataValidator:
     """Utility for data validation and preprocessing"""
@@ -112,17 +105,6 @@ class DataValidator:
     def remove_outliers(y: np.ndarray, threshold: float = 3.0) -> np.ndarray:
         z_scores = np.abs((y - np.mean(y)) / np.std(y))
         return np.where(z_scores > threshold, np.median(y), y)
-
-    @staticmethod
-    def create_features(y: np.ndarray) -> pd.DataFrame:
-        """Create time-based features"""
-        dates = pd.date_range(start="2015-01-01", periods=len(y), freq='M')
-        df = pd.DataFrame({'value': y, 'date': dates})
-        df['month'] = df['date'].dt.month
-        df['quarter'] = df['date'].dt.quarter
-        df['year'] = df['date'].dt.year
-        df['trend'] = np.arange(len(y))
-        return df
 
 class StatisticalForecaster:
     """Enhanced ARIMA/SARIMAX with automatic order selection"""
@@ -145,21 +127,17 @@ class StatisticalForecaster:
             self.history = y.copy()
             self.exog_history = exog.copy() if exog is not None else None
             
-            # Auto-select orders if requested
             if auto_select:
                 order = self._auto_select_order(y)
                 if order:
                     self.config.statistical_order = order
             
-            # Check stationarity
             adf_result = adfuller(y)
             is_stationary = adf_result[1] < 0.05
             
             if exog is not None:
                 self.model_fit = SARIMAX(
-                    y, 
-                    exog=exog, 
-                    order=self.config.statistical_order,
+                    y, exog=exog, order=self.config.statistical_order,
                     seasonal_order=self.config.seasonal_order,
                     enforce_stationarity=not is_stationary
                 ).fit(disp=False)
@@ -181,14 +159,9 @@ class StatisticalForecaster:
             best_aic = np.inf
             best_order = None
             
-            # Grid search for best order
-            p_range = range(0, 3)
-            d_range = range(0, 2)
-            q_range = range(0, 3)
-            
-            for p in p_range:
-                for d in d_range:
-                    for q in q_range:
+            for p in range(0, 3):
+                for d in range(0, 2):
+                    for q in range(0, 3):
                         try:
                             model = ARIMA(y, order=(p, d, q))
                             fit = model.fit(disp=False)
@@ -206,7 +179,6 @@ class StatisticalForecaster:
     def predict(self, steps: int = 1, exog_future: Optional[np.ndarray] = None) -> np.ndarray:
         """Generate predictions with confidence intervals"""
         if self.model_fit is None:
-            # Fallback to naive forecast
             last_value = self.history[-1] if self.history is not None else 0
             self.confidence_intervals = None
             return np.full(steps, last_value)
@@ -244,26 +216,17 @@ class TransformerForecaster(nn.Module):
         self.input_proj = nn.Linear(input_size, hidden_size)
         self.pos_encoding = PositionalEncoding(hidden_size)
         
-        # Multi-head attention with layer norm
         encoder_layers = nn.TransformerEncoderLayer(
-            d_model=hidden_size, 
-            nhead=nhead, 
-            dropout=dropout, 
-            batch_first=True,
-            activation='gelu'
+            d_model=hidden_size, nhead=nhead, dropout=dropout, 
+            batch_first=True, activation='gelu'
         )
         self.transformer = nn.TransformerEncoder(encoder_layers, num_layers)
-        
-        # Output layers
         self.dropout = nn.Dropout(dropout)
         self.batch_norm = nn.BatchNorm1d(hidden_size)
         self.linear = nn.Linear(hidden_size, 1)
-        
-        # Initialize weights
         self._init_weights()
     
     def _init_weights(self):
-        """Initialize weights with Xavier uniform"""
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
@@ -272,7 +235,7 @@ class TransformerForecaster(nn.Module):
         x = self.input_proj(x)
         x = self.pos_encoding(x)
         x = self.transformer(x)
-        x = x[:, -1, :]  # Take last time step
+        x = x[:, -1, :]
         x = self.dropout(x)
         x = self.batch_norm(x)
         return self.linear(x)
@@ -285,27 +248,18 @@ class DeepLearningForecaster:
         self.model = None
         self.y_scaler = None
         self.exog_scaler = None
-        self.feature_scaler = None
         self.history = None
         self.uncertainty = None
         self.training_losses = []
         
     def fit(self, y: np.ndarray, exog: Optional[np.ndarray] = None):
         """Fit deep learning model with proper scaling"""
-        try:
-            import torch
-            from sklearn.preprocessing import StandardScaler, MinMaxScaler
-        except ImportError:
-            st.error("PyTorch or scikit-learn not installed")
-            return self
-        
         # Validate data
         is_valid, msg = DataValidator.validate_time_series(y)
         if not is_valid:
             st.error(f"Data validation failed: {msg}")
             return self
         
-        # Store data
         self.history = y.copy()
         
         # FIXED: Separate scalers for each data type
@@ -322,7 +276,6 @@ class DeepLearningForecaster:
             combined = y_scaled.reshape(-1, 1)
             input_size = 1
         
-        # Check sufficient data
         if len(y) <= self.config.lookback + 10:
             st.warning(f"Insufficient data: {len(y)} points, need > {self.config.lookback + 10}")
             return self
@@ -334,32 +287,26 @@ class DeepLearningForecaster:
         X, Y = self._create_sequences(combined, y_scaled)
         
         # Train-validation split
-        val_size = int(len(X) * self.config.validation_split)
+        val_size = int(len(X) * 0.1)
         X_train, X_val = X[:-val_size], X[-val_size:]
         Y_train, Y_val = Y[:-val_size], Y[-val_size:]
         
         # Training setup
-        criterion = nn.HuberLoss(delta=1.0)  # Robust loss
+        criterion = nn.HuberLoss(delta=1.0)
         optimizer = torch.optim.AdamW(
-            self.model.parameters(), 
-            lr=self.config.learning_rate,
-            weight_decay=1e-5
+            self.model.parameters(), lr=self.config.learning_rate, weight_decay=1e-5
         )
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer,
-            max_lr=self.config.learning_rate * 10,
-            epochs=self.config.epochs,
-            steps_per_epoch=len(X_train) // self.config.batch_size + 1
+            optimizer, max_lr=self.config.learning_rate * 10,
+            epochs=self.config.epochs, steps_per_epoch=len(X_train) // self.config.batch_size + 1
         )
         
         # Training loop
         best_val_loss = np.inf
         patience_counter = 0
-        
         progress_placeholder = st.empty()
         
         for epoch in range(self.config.epochs):
-            # Training
             self.model.train()
             train_losses = []
             
@@ -371,7 +318,6 @@ class DeepLearningForecaster:
                 output = self.model(batch_x)
                 loss = criterion(output, batch_y)
                 
-                # Adversarial training
                 if self.config.adversarial_training:
                     X_adv = batch_x + torch.randn_like(batch_x) * self.config.epsilon_adv
                     adv_output = self.model(X_adv)
@@ -382,7 +328,6 @@ class DeepLearningForecaster:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 optimizer.step()
                 scheduler.step()
-                
                 train_losses.append(loss.item())
             
             # Validation
@@ -391,7 +336,6 @@ class DeepLearningForecaster:
                 val_output = self.model(X_val)
                 val_loss = criterion(val_output, Y_val).item()
             
-            # Early stopping
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
@@ -401,12 +345,9 @@ class DeepLearningForecaster:
                 if patience_counter >= self.config.early_stopping_patience:
                     break
             
-            # Progress update
             if epoch % 10 == 0:
                 progress_placeholder.info(
-                    f"Epoch {epoch}/{self.config.epochs} | "
-                    f"Train Loss: {np.mean(train_losses):.4f} | "
-                    f"Val Loss: {val_loss:.4f}"
+                    f"Epoch {epoch}/{self.config.epochs} | Train Loss: {np.mean(train_losses):.4f} | Val Loss: {val_loss:.4f}"
                 )
             
             self.training_losses.append(np.mean(train_losses))
@@ -419,10 +360,8 @@ class DeepLearningForecaster:
         """Build the deep learning model"""
         if self.config.dl_architecture == "transformer":
             self.model = TransformerForecaster(
-                input_size=input_size,
-                hidden_size=self.config.hidden_size,
-                num_layers=self.config.num_layers,
-                dropout=self.config.dropout,
+                input_size=input_size, hidden_size=self.config.hidden_size,
+                num_layers=self.config.num_layers, dropout=self.config.dropout,
                 nhead=self.config.nhead
             )
         else:
@@ -432,8 +371,7 @@ class DeepLearningForecaster:
                     self.lstm = nn.LSTM(
                         input_size, hidden_size, num_layers,
                         dropout=dropout if num_layers > 1 else 0,
-                        batch_first=True,
-                        bidirectional=False
+                        batch_first=True, bidirectional=False
                     )
                     self.dropout = nn.Dropout(dropout)
                     self.batch_norm = nn.BatchNorm1d(hidden_size)
@@ -452,6 +390,7 @@ class DeepLearningForecaster:
     
     def _create_sequences(self, combined: np.ndarray, y_scaled: np.ndarray):
         """Create training sequences"""
+        from sklearn.preprocessing import StandardScaler
         X, Y = [], []
         for i in range(len(combined) - self.config.lookback):
             X.append(combined[i:i + self.config.lookback])
@@ -468,12 +407,10 @@ class DeepLearningForecaster:
             st.warning("Model not trained, returning naive forecast")
             return np.full(steps, y[-1] if len(y) > 0 else 0)
         
-        import torch
-        
         self.model.eval()
         self.model.load_state_dict(self.best_state)
         
-        # Scale target
+        # FIXED: Use y_scaler
         y_scaled = self.y_scaler.transform(y.reshape(-1, 1)).flatten()
         
         # Prepare features
@@ -487,23 +424,17 @@ class DeepLearningForecaster:
         current_seq = combined[-self.config.lookback:]
         self.uncertainty = None
         
-        # Uncertainty quantification via MC Dropout
         if uncertainty_quantification:
-            self.model.train()  # Enable dropout
+            self.model.train()
         
         for step in range(steps):
-            # Pad if necessary
             if len(current_seq) < self.config.lookback:
                 pad_len = self.config.lookback - len(current_seq)
                 current_seq = np.pad(current_seq, ((pad_len, 0), (0, 0)), mode='edge')
             
-            seq_tensor = torch.tensor(
-                current_seq[-self.config.lookback:], 
-                dtype=torch.float32
-            ).unsqueeze(0)
+            seq_tensor = torch.tensor(current_seq[-self.config.lookback:], dtype=torch.float32).unsqueeze(0)
             
             if uncertainty_quantification:
-                # Monte Carlo sampling
                 mc_preds = []
                 for _ in range(50):
                     with torch.no_grad():
@@ -516,18 +447,16 @@ class DeepLearningForecaster:
                     pred = self.model(seq_tensor).cpu().numpy()[0, 0]
                     predictions.append(pred)
             
-            # Inverse scale
             pred_original = self.y_scaler.inverse_transform([[predictions[-1]]])[0, 0]
             predictions[-1] = pred_original
             
-            # Update sequence
             new_point = np.array([[predictions[-1]] + ([0] * (combined.shape[1] - 1))])
             current_seq = np.append(current_seq, new_point, axis=0)
         
         return np.array(predictions)
 
 class RAGPipeline:
-    """Production-ready RAG with hallucination detection and caching"""
+    """Production-ready RAG with hallucination detection"""
     
     def __init__(self, config: ForecastConfig):
         self.config = config
@@ -538,15 +467,6 @@ class RAGPipeline:
         self.hallucination_threshold = 0.3
         self.cache = {}
     
-    @st.cache_resource
-    def load_corpus_from_file(_self, file_path: str) -> List[str]:
-        """Load corpus from file with caching"""
-        try:
-            with open(file_path, 'r') as f:
-                return f.readlines()
-        except:
-            return []
-    
     def build_corpus(self, corpus: List[str], use_cache: bool = True):
         """Build searchable corpus"""
         if not corpus:
@@ -554,34 +474,38 @@ class RAGPipeline:
             return
         
         from rank_bm25 import BM25Okapi
-        from sentence_transformers import SentenceTransformer
         
         self.corpus = corpus
         tokenized_corpus = [doc.lower().split() for doc in corpus]
         self.bm25 = BM25Okapi(tokenized_corpus)
         
-        # Load semantic model with progress bar
-        model_load_container = st.empty()
-        model_load_container.info("Loading semantic model...")
-        self.semantic_model = SentenceTransformer(self.config.rag_semantic_model)
-        model_load_container.empty()
-        
-        # Cache embeddings
-        if use_cache and hasattr(st, 'session_state'):
-            cache_key = f"embeddings_{hash(str(corpus))}"
-            if cache_key in st.session_state:
-                self.corpus_embeddings = st.session_state[cache_key]
+        # Try loading semantic model
+        try:
+            from sentence_transformers import SentenceTransformer
+            model_load_container = st.empty()
+            model_load_container.info("Loading semantic model...")
+            self.semantic_model = SentenceTransformer(self.config.rag_semantic_model)
+            model_load_container.empty()
+            
+            if use_cache and hasattr(st, 'session_state'):
+                cache_key = f"embeddings_{hash(str(corpus))}"
+                if cache_key in st.session_state:
+                    self.corpus_embeddings = st.session_state[cache_key]
+                else:
+                    self.corpus_embeddings = self.semantic_model.encode(corpus, convert_to_tensor=True)
+                    st.session_state[cache_key] = self.corpus_embeddings
             else:
                 self.corpus_embeddings = self.semantic_model.encode(corpus, convert_to_tensor=True)
-                st.session_state[cache_key] = self.corpus_embeddings
-        else:
-            self.corpus_embeddings = self.semantic_model.encode(corpus, convert_to_tensor=True)
-        
-        st.success(f"✅ RAG corpus loaded ({len(corpus)} documents)")
+            
+            st.success(f"✅ RAG corpus loaded ({len(corpus)} documents)")
+        except ImportError:
+            st.warning("⚠️ sentence-transformers not available. Using BM25-only retrieval.")
+            self.semantic_model = None
+            self.corpus_embeddings = None
     
     def retrieve(self, query: str, top_k: Optional[int] = None) -> Tuple[List[str], List[float], List[bool]]:
         """Hybrid retrieval with BM25 + semantic search"""
-        if not self.bm25 or not self.semantic_model:
+        if not self.bm25:
             return [], [], []
         
         cache_key = f"{query}_{top_k}"
@@ -590,103 +514,63 @@ class RAGPipeline:
         
         top_k = top_k or self.config.rag_top_k
         tokenized_query = query.lower().split()
-        
-        # BM25 scores
         bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
-        
-        # Semantic scores
-        query_embedding = self.semantic_model.encode(query, convert_to_tensor=True)
-        semantic_scores = torch.cosine_similarity(
-            query_embedding.unsqueeze(0), self.corpus_embeddings
-        ).cpu().numpy()
-        
-        # Normalize scores
         bm25_scores = (bm25_scores - bm25_scores.mean()) / (bm25_scores.std() + 1e-8)
-        semantic_scores = (semantic_scores - semantic_scores.mean()) / (semantic_scores.std() + 1e-8)
         
-        # Combine
-        combined_scores = (
-            self.config.rag_hybrid_weight * bm25_scores +
-            (1 - self.config.rag_hybrid_weight) * semantic_scores
-        )
+        if self.semantic_model is None:
+            combined_scores = bm25_scores
+        else:
+            query_embedding = self.semantic_model.encode(query, convert_to_tensor=True)
+            semantic_scores = torch.cosine_similarity(
+                query_embedding.unsqueeze(0), self.corpus_embeddings
+            ).cpu().numpy()
+            semantic_scores = (semantic_scores - semantic_scores.mean()) / (semantic_scores.std() + 1e-8)
+            combined_scores = (
+                self.config.rag_hybrid_weight * bm25_scores +
+                (1 - self.config.rag_hybrid_weight) * semantic_scores
+            )
         
-        # Get top k
         top_indices = np.argsort(combined_scores)[-top_k:][::-1]
-        
         retrieved_docs = [self.corpus[i] for i in top_indices]
         retrieved_scores = [float(combined_scores[i]) for i in top_indices]
         is_reliable = [score > self.hallucination_threshold for score in retrieved_scores]
         
-        # Cache results
         self.cache[cache_key] = (retrieved_docs, retrieved_scores, is_reliable)
-        
         return retrieved_docs, retrieved_scores, is_reliable
 
 class LLMForecaster:
-    """LLM-based forecasting with RAG and structured output"""
+    """LLM-based forecasting with RAG"""
     
     def __init__(self, config: ForecastConfig, rag_pipeline: Optional[RAGPipeline] = None):
         self.config = config
         self.rag = rag_pipeline
-        self.conversation_history = []
-        self.hallucination_detector = lambda x: True  # Placeholder
+        self.history = None
     
     def predict(self, y: np.ndarray, steps: int = 1, context: Optional[str] = None) -> Tuple[np.ndarray, str, float]:
         """Generate LLM forecast with confidence scoring"""
-        # RAG retrieval
+        self.history = y
         retrieved_docs, scores, reliability = [], [], []
+        
         if self.config.use_rag and self.rag and context:
             retrieved_docs, scores, reliability = self.rag.retrieve(context)
         
-        # Prepare prompt
-        recent_values = y[-20:].tolist()
-        prompt = self._build_prompt(recent_values, steps, context, retrieved_docs, reliability)
-        
-        # Call LLM
+        prompt = self._build_prompt(y[-20:].tolist(), steps, context, retrieved_docs, reliability)
         forecast, reasoning, confidence = self._call_llm(prompt, steps)
         
-        # Adjust confidence based on RAG reliability
         if reliability and not any(reliability):
             confidence *= 0.5
-            reasoning += " (Confidence reduced due to low-quality retrieval)"
-        
-        # Validate forecast
-        if len(forecast) != steps:
-            st.warning(f"LLM returned {len(forecast)} values, expected {steps}. Padding/truncating.")
-            forecast = np.pad(forecast, (0, steps - len(forecast)), mode='edge')[:steps]
         
         return forecast, reasoning, confidence
     
     def _build_prompt(self, recent_values: List[float], steps: int, 
                      context: Optional[str], retrieved_docs: List[str], 
                      reliability: List[bool]) -> str:
-        """Build structured prompt for LLM"""
-        return f"""
-        You are an expert economic forecaster. Analyze the following time series and provide forecasts.
-
-        TASK: Forecast the next {steps} values for the time series: {recent_values}
-
-        REQUIREMENTS:
-        1. Return a JSON object with exactly this structure:
-           {{"forecast": [float, float, ...], "reasoning": "...", "confidence": 0.0-1.0}}
-        2. The "forecast" array must contain exactly {steps} numbers
-        3. "reasoning" should explain patterns, trends, and factors considered
-        4. "confidence" should reflect your certainty in the forecast
-
-        CONTEXT:
-        {context or "No additional context provided"}
-
-        RELEVANT ECONOMIC KNOWLEDGE:
-        {chr(10).join([f"- {doc.strip()}" for doc in retrieved_docs[:3]]) if retrieved_docs else "No external knowledge retrieved."}
-
-        RELIABILITY SCORES: {reliability[:3] if retrieved_docs else "N/A"}
-
-        GUIDELINES:
-        - Consider trend, seasonality, and recent anomalies
-        - Factor in economic context if provided
-        - Be conservative with confidence for volatile periods
-        - If values seem abnormal, note this in reasoning
-        """
+        """Build structured prompt"""
+        return f"""You are an expert economic forecaster. 
+Forecast next {steps} values for: {recent_values}
+Return JSON: {{"forecast": [...], "reasoning": "...", "confidence": 0.0-1.0}}
+Context: {context or "No additional context"}
+Knowledge: {' | '.join(retrieved_docs[:3]) if retrieved_docs else "None"}"""
     
     def _call_llm(self, prompt: str, steps: int) -> Tuple[np.ndarray, str, float]:
         """Call LLM API with fallback"""
@@ -697,7 +581,7 @@ class LLMForecaster:
             response = openai.ChatCompletion.create(
                 model=self.config.llm_model,
                 messages=[
-                    {"role": "system", "content": "You are a forecasting assistant that outputs only valid JSON."},
+                    {"role": "system", "content": "You are a forecasting assistant."},
                     {"role": "user", "content": prompt}
                 ],
                 max_tokens=self.config.max_tokens,
@@ -708,27 +592,30 @@ class LLMForecaster:
             data = json.loads(content)
             
             forecast = np.array(data["forecast"][:steps], dtype=float)
-            reasoning = data.get("reasoning", "No reasoning provided")
+            reasoning = data.get("reasoning", "No reasoning")
             confidence = float(data.get("confidence", 0.5))
             
             return forecast, reasoning, confidence
             
         except Exception as e:
-            st.warning(f"LLM API call failed: {str(e)}. Using fallback.")
+            st.warning(f"LLM failed: {str(e)}. Using fallback.")
             return self._fallback_forecast(steps)
     
     def _fallback_forecast(self, steps: int) -> Tuple[np.ndarray, str, float]:
-        """Robust fallback when LLM unavailable"""
-        recent_trend = np.mean(self.history[-5:]) - np.mean(self.history[-10:-5]) if len(self.history) >= 10 else 0
+        """Robust fallback"""
+        if len(self.history) >= 10:
+            trend = np.mean(self.history[-5:]) - np.mean(self.history[-10:-5])
+        else:
+            trend = 0
         last_value = self.history[-1] if len(self.history) > 0 else 100
         
-        forecast = last_value + np.arange(1, steps + 1) * recent_trend * 0.3
-        forecast += np.random.normal(0, abs(recent_trend) * 0.1, steps)  # Add small noise
+        forecast = last_value + np.arange(1, steps + 1) * trend * 0.3
+        forecast += np.random.normal(0, abs(trend) * 0.1, steps)
         
-        return forecast, "LLM unavailable - using trend-based fallback", 0.2
+        return forecast, "LLM fallback - trend-based", 0.2
 
 class MetaController:
-    """Advanced meta-controller with uncertainty quantification and drift detection"""
+    """Advanced meta-controller with drift detection"""
     
     def __init__(self, config: ForecastConfig):
         self.config = config
@@ -737,42 +624,32 @@ class MetaController:
             ModelType.DEEP_LEARNING: [],
             ModelType.LLM: []
         }
-        self.uncertainty_history = {
-            ModelType.STATISTICAL: [],
-            ModelType.DEEP_LEARNING: [],
-            ModelType.LLM: []
-        }
         self.weights_history = []
         self.drift_alerts = []
     
     def compute_loss(self, y_true: float, y_pred: float, uncertainty: float, model_type: ModelType):
-        """Compute loss with uncertainty penalty"""
         base_loss = (y_true - y_pred) ** 2
         adjusted_loss = base_loss + self.config.alpha * uncertainty
         self.performance_history[model_type].append(adjusted_loss)
         
-        # Maintain window
         if len(self.performance_history[model_type]) > self.config.window_size:
             self.performance_history[model_type].pop(0)
     
     def update_weights(self, current_uncertainties: Dict[ModelType, float]) -> np.ndarray:
-        """Compute dynamic weights using softmax of inverse losses"""
+        """Compute dynamic weights"""
         avg_losses = [
             self.get_average_loss(model_type) 
             for model_type in [ModelType.STATISTICAL, ModelType.DEEP_LEARNING, ModelType.LLM]
         ]
         
-        # Apply uncertainty penalties
         if current_uncertainties and self.config.uncertainty_weighting:
             for i, model_type in enumerate([ModelType.STATISTICAL, ModelType.DEEP_LEARNING, ModelType.LLM]):
                 if model_type in current_uncertainties:
                     avg_losses[i] += current_uncertainties[model_type] * 2
         
-        # Guardrail for LLM
         if avg_losses[2] > self.config.guardrail_threshold:
             avg_losses[2] = np.inf
         
-        # Softmax weights
         exp_terms = np.exp(-self.config.alpha * np.array(avg_losses))
         exp_terms = np.where(np.isinf(avg_losses), 0, exp_terms)
         
@@ -787,17 +664,15 @@ class MetaController:
         return np.mean(losses) if losses else 0.0
     
     def detect_drift(self, recent_loss: float, model_type: ModelType) -> Dict[str, Any]:
-        """Detect performance drift with statistical tests"""
+        """Detect performance drift"""
         losses = self.performance_history[model_type]
         if len(losses) < 20:
             return {"drift": False, "severity": 0}
         
-        # Compute statistics
         historical_mean = np.mean(losses[:-10])
         historical_std = np.std(losses[:-10])
         recent_mean = np.mean(losses[-10:])
         
-        # Z-score test
         z_score = (recent_mean - historical_mean) / (historical_std + 1e-8)
         drift_detected = z_score > 2.0
         
@@ -808,12 +683,7 @@ class MetaController:
                 "z_score": z_score
             })
         
-        return {
-            "drift": drift_detected,
-            "severity": abs(z_score),
-            "historical_mean": historical_mean,
-            "recent_mean": recent_mean
-        }
+        return {"drift": drift_detected, "severity": abs(z_score)}
 
 class TRIFUSIONFramework:
     """Main orchestrator for the three-component forecasting framework"""
@@ -828,20 +698,15 @@ class TRIFUSIONFramework:
         self.rag = RAGPipeline(config)
         self.llm = LLMForecaster(config, self.rag)
         self.meta_controller = MetaController(config)
-        self.federated_aggregator = None
         
         # State
         self.history = None
         self.exog_history = None
         self.is_fitted = False
-        
-        # Performance tracking
-        self.backtest_results = None
     
     def fit(self, y: np.ndarray, exog: Optional[np.ndarray] = None, 
             context: Optional[List[str]] = None):
         """Fit all three components"""
-        # Validate data
         is_valid, msg = DataValidator.validate_time_series(y)
         if not is_valid:
             raise ValueError(f"Data validation failed: {msg}")
@@ -865,7 +730,7 @@ class TRIFUSIONFramework:
     
     def predict(self, steps: int = 1, exog_future: Optional[np.ndarray] = None,
                 context: Optional[str] = None) -> Dict[str, Any]:
-        """Generate hybrid forecast with full diagnostics"""
+        """Generate hybrid forecast"""
         if not self.is_fitted:
             raise RuntimeError("Framework must be fitted before prediction")
         
@@ -876,12 +741,12 @@ class TRIFUSIONFramework:
         pred_llm, reasoning, confidence = self.llm.predict(self.history, steps, context)
         
         # Ensure consistent length
-        steps = min(steps, len(pred_stat), len(pred_deep), len(pred_llm))
-        pred_stat, pred_deep, pred_llm = pred_stat[:steps], pred_deep[:steps], pred_llm[:steps]
+        min_len = min(len(pred_stat), len(pred_deep), len(pred_llm))
+        pred_stat, pred_deep, pred_llm = pred_stat[:min_len], pred_deep[:min_len], pred_llm[:min_len]
         
-        # Uncertainty quantification
+        # Uncertainty
         uncertainties = {
-            ModelType.STATISTICAL: 0.1,  # Fixed for statistical
+            ModelType.STATISTICAL: 0.1,
             ModelType.DEEP_LEARNING: getattr(self.deep_learning, 'uncertainty', 0.1),
             ModelType.LLM: max(0.1, 1.0 - confidence)
         }
@@ -892,8 +757,7 @@ class TRIFUSIONFramework:
         # Detect drift
         drift_results = {
             model_type: self.meta_controller.detect_drift(
-                self.meta_controller.get_average_loss(model_type),
-                model_type
+                self.meta_controller.get_average_loss(model_type), model_type
             )
             for model_type in [ModelType.STATISTICAL, ModelType.DEEP_LEARNING, ModelType.LLM]
         }
@@ -902,13 +766,10 @@ class TRIFUSIONFramework:
         if drift_results[ModelType.DEEP_LEARNING]["drift"]:
             weights[1] *= 1.2
             weights /= weights.sum()
-            st.warning("⚠️ Drift detected in deep learning model - increasing weight")
+            st.warning("⚠️ Drift detected in deep learning model")
         
         # Hybrid forecast
         hybrid = weights[0] * pred_stat + weights[1] * pred_deep + weights[2] * pred_llm
-        
-        # Confidence interval
-        conf_int = self.statistical.get_confidence_interval()
         
         # Overall confidence
         overall_confidence = 1.0 - np.dot(weights, list(uncertainties.values()))
@@ -928,67 +789,19 @@ class TRIFUSIONFramework:
             'uncertainties': {k.value: v for k, v in uncertainties.items()},
             'drift_detected': {k.value: v for k, v in drift_results.items()},
             'explanation': reasoning,
-            'confidence_interval': conf_int,
-            'overall_confidence': overall_confidence,
-            'timestamp': datetime.now()
+            'confidence_interval': self.statistical.get_confidence_interval(),
+            'overall_confidence': overall_confidence
         }
     
-    def backtest(self, n_splits: int = 3) -> pd.DataFrame:
-        """Perform walk-forward backtesting"""
-        if not self.is_fitted:
-            raise RuntimeError("Framework must be fitted before backtesting")
-        
-        from sklearn.model_selection import TimeSeriesSplit
-        
-        tscv = TimeSeriesSplit(n_splits=n_splits)
-        backtest_results = []
-        
-        for fold, (train_idx, test_idx) in enumerate(tscv.split(self.history)):
-            fold_train_y = self.history[train_idx]
-            fold_test_y = self.history[test_idx]
-            fold_exog_train = self.exog_history[train_idx] if self.exog_history is not None else None
-            fold_exog_test = self.exog_history[test_idx] if self.exog_history is not None else None
-            
-            # Retrain on fold
-            fold_model = TRIFUSIONFramework(self.config)
-            fold_model.fit(fold_train_y, fold_exog_train)
-            
-            # Predict
-            result = fold_model.predict(steps=len(test_idx), exog_future=fold_exog_test)
-            
-            # Store results
-            for i, (actual, pred) in enumerate(zip(fold_test_y, result['forecast'])):
-                backtest_results.append({
-                    'fold': fold,
-                    'index': i,
-                    'actual': actual,
-                    'forecast': pred,
-                    'error': actual - pred,
-                    'abs_error': abs(actual - pred)
-                })
-        
-        self.backtest_results = pd.DataFrame(backtest_results)
-        return self.backtest_results
-    
-    def enable_federated_learning(self, client_data: List[Dict[str, Any]]):
-        """Setup federated learning across multiple clients"""
-        self.federated_aggregator = FederatedAggregator(self, self.config)
-        self.federated_aggregator.create_clients(client_data)
-    
-    def get_feature_importance(self) -> Optional[pd.DataFrame]:
-        """Get feature importance for interpretability"""
-        if self.deep_learning.model is None:
-            return None
-        
-        # Placeholder for SHAP or integrated gradients
-        importance_df = pd.DataFrame({
-            'feature': ['lag_1', 'lag_2', 'lag_3', 'exog_1', 'exog_2'],
-            'importance': np.random.rand(5)
-        })
-        return importance_df.sort_values('importance', ascending=False)
+    def update_with_new_data(self, y_new: float, exog_new: Optional[np.ndarray] = None):
+        """Online learning update"""
+        if self.history is not None:
+            self.history = np.append(self.history, y_new)
+            if self.exog_history is not None and exog_new is not None:
+                self.exog_history = np.vstack([self.exog_history, exog_new])
 
 class DOSMDataLoader:
-    """Robust data loader with fallback and validation"""
+    """Robust data loader with caching and fallback"""
     
     def __init__(self):
         self.base_url = "https://storage.dosm.gov.my"
@@ -999,25 +812,14 @@ class DOSMDataLoader:
         self.cache_dir = Path("./data_cache")
         self.cache_dir.mkdir(exist_ok=True)
     
-    @st.cache_data(ttl=3600)  # Cache for 1 hour
+    @st.cache_data(ttl=3600)
     def load_cpi_data(self, state: str = "Malaysia", start_date: str = "2015-01-01") -> pd.DataFrame:
-        """Load CPI data with caching and fallback"""
-        cache_key = f"{state}_{start_date}"
-        cache_file = self.cache_dir / f"cpi_{cache_key}.parquet"
-        
-        # Try cache first
-        if cache_file.exists():
-            try:
-                return pd.read_parquet(cache_file)
-            except:
-                pass
-        
+        """Load CPI data with caching"""
         try:
             url = f"{self.base_url}{self.datasets['cpi_state']}"
             df = pd.read_parquet(url)
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
             
-            # Handle state filtering
             state_col = next((col for col in ['state', 'state_name'] if col in df.columns), None)
             if state_col:
                 if state == "Malaysia":
@@ -1035,14 +837,11 @@ class DOSMDataLoader:
             if df_filtered.empty:
                 raise ValueError("No data after filtering")
             
-            # Cache
-            df_filtered.to_parquet(cache_file)
             st.success(f"✅ Loaded {len(df_filtered)} CPI records for {state}")
             return df_filtered
             
         except Exception as e:
             st.error(f"❌ Failed to load DOSM data: {str(e)}")
-            st.warning("⚠️ Generating synthetic fallback data")
             return self._generate_synthetic_cpi(state, start_date)
     
     def _generate_synthetic_cpi(self, state: str, start_date: str) -> pd.DataFrame:
@@ -1051,63 +850,41 @@ class DOSMDataLoader:
         end = pd.Timestamp.now()
         dates = pd.date_range(start=start, end=end, freq='M')
         
-        # Multiplicative trend with structural breaks
         base_cpi = 100
         values = []
         
         for i, date in enumerate(dates):
-            # Trend
             trend = 1 + (date.year - 2015) * 0.015 + i * 0.0003
-            
-            # Seasonality
             seasonal = 1 + 0.02 * np.sin(2 * np.pi * date.month / 12)
             
             # Structural breaks
             break_effects = 1.0
             if pd.Timestamp('2018-09-01') <= date <= pd.Timestamp('2018-12-01'):
-                break_effects *= 1.02  # SST implementation
+                break_effects *= 1.02
             if pd.Timestamp('2020-03-01') <= date <= pd.Timestamp('2021-06-01'):
-                break_effects *= 1.04  # COVID impact
+                break_effects *= 1.04
             if pd.Timestamp('2022-06-01') <= date <= pd.Timestamp('2022-09-01'):
-                break_effects *= 1.03  # Subsidy rationalization
+                break_effects *= 1.03
             
-            # Noise
             noise = np.random.normal(0, 0.25)
-            
             cpi = base_cpi * trend * seasonal * break_effects + noise
             values.append(max(95, min(135, cpi)))
         
-        return pd.DataFrame({
-            'date': dates,
-            'state': state,
-            'index': values
-        })
+        return pd.DataFrame({'date': dates, 'state': state, 'index': values})
     
     @st.cache_data
     def load_exogenous_data(_self, start_date: str = "2015-01-01") -> pd.DataFrame:
-        """Generate synthetic but realistic exogenous variables"""
+        """Generate synthetic exogenous variables"""
         end = pd.Timestamp.now()
         dates = pd.date_range(start=start_date, end=end, freq='M')
         
         data = []
         for date in dates:
-            # Oil price: mean-reverting with trends
-            oil_trend = 60 + (date.year - 2020) * 2
-            oil_cycle = 15 * np.sin(2 * np.pi * date.year / 3)
-            oil_noise = np.random.normal(0, 5)
-            oil_price = max(40, min(120, oil_trend + oil_cycle + oil_noise))
-            
-            # USD/MYR: realistic exchange rate
+            oil_price = 60 + (date.year - 2020) * 2 + 15 * np.sin(2 * np.pi * date.year / 3) + np.random.normal(0, 5)
             usd_myr = 4.2 + 0.1 * np.sin(2 * np.pi * date.year / 5) + np.random.normal(0, 0.08)
-            usd_myr = max(3.8, min(4.8, usd_myr))
             
-            # Policy events (binary)
-            policy_shock = 1.0 if date in [
-                pd.Timestamp('2018-09-01'), 
-                pd.Timestamp('2022-06-01')
-            ] else 0.0
+            policy_shock = 1.0 if date in [pd.Timestamp('2018-09-01'), pd.Timestamp('2022-06-01')] else 0.0
             
-            # COVID impact (graduated)
             if pd.Timestamp('2020-03-01') <= date <= pd.Timestamp('2021-03-01'):
                 covid_impact = 1.5
             elif pd.Timestamp('2021-04-01') <= date <= pd.Timestamp('2021-12-01'):
@@ -1117,8 +894,8 @@ class DOSMDataLoader:
             
             data.append({
                 'date': date,
-                'oil_price': oil_price,
-                'usd_myr': usd_myr,
+                'oil_price': max(40, min(120, oil_price)),
+                'usd_myr': max(3.8, min(4.8, usd_myr)),
                 'policy_shock': policy_shock,
                 'covid_impact': covid_impact
             })
@@ -1149,22 +926,18 @@ class TRIFUSIONApp:
             self._run_analysis()
     
     def _render_header(self):
-        """Render app header with branding"""
+        """Render app header"""
         st.markdown("""
         <style>
-        .main-header { text-align: center; padding: 1rem; }
-        .metric-card { background: #f0f2f6; padding: 1rem; border-radius: 0.5rem; }
+        .main-header { text-align: center; padding: 1rem; background: linear-gradient(90deg, #1f77b4, #ff7f0e); color: white; border-radius: 10px; }
+        .metric-card { background: #f0f2f6; padding: 1rem; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
         </style>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("""
         <div class="main-header">
             <h1>📈 TRIFUSION Forecasting Framework</h1>
             <p>Advanced Hybrid Time Series Forecasting with LLM Integration</p>
-            <p style="color: #666;">Powered by DOSM Malaysia Open Data</p>
+            <p style="color: #eee;">Powered by DOSM Malaysia Open Data</p>
         </div>
         """, unsafe_allow_html=True)
-        
         st.markdown("---")
     
     def _render_sidebar(self):
@@ -1172,13 +945,12 @@ class TRIFUSIONApp:
         with st.sidebar:
             st.header("⚙️ Configuration")
             
-            # Model Selection
             st.subheader("Model Architecture")
             dl_arch = st.selectbox("Deep Learning", ["transformer", "lstm"], index=0)
             
             st.subheader("Hyperparameters")
             lookback = st.slider("Lookback Window", 12, 60, 36)
-            epochs = st.slider("Training Epochs", 50, 500, 100)
+            epochs = st.slider("Training Epochs", 50, 300, 100)
             lr = st.slider("Learning Rate", 0.0001, 0.01, 0.001, format="%.4f")
             
             st.subheader("Data Settings")
@@ -1187,14 +959,12 @@ class TRIFUSIONApp:
             test_size = st.slider("Test Period (months)", 6, 36, 24)
             
             st.subheader("LLM Settings")
-            api_key = st.text_input("OpenAI API Key", type="password")
+            api_key = st.text_input("OpenAI API Key (optional)", type="password")
             use_rag = st.checkbox("Enable RAG", value=True)
             
             st.subheader("Advanced")
             uncertainty_weighting = st.checkbox("Uncertainty Weighting", value=True)
-            adversarial_training = st.checkbox("Adversarial Training", value=False)
             
-            # Build config
             self.config = ForecastConfig(
                 dl_architecture=dl_arch,
                 lookback=lookback,
@@ -1203,43 +973,42 @@ class TRIFUSIONApp:
                 api_key=api_key or None,
                 use_rag=use_rag,
                 uncertainty_weighting=uncertainty_weighting,
-                adversarial_training=adversarial_training,
                 test_size=test_size
             )
             
             st.markdown("---")
             st.info("""
-            **Framework Components:**
-            - 🔢 Statistical (ARIMA/SARIMAX)
-            - 🧠 Deep Learning (Transformer/LSTM)
-            - 🤖 LLM (GPT with RAG)
-            - ⚖️ Dynamic Meta-Controller
+            **Components:**
+            - 🔢 ARIMA/SARIMAX
+            - 🧠 Transformer/LSTM
+            - 🤖 GPT-4 with RAG
+            - ⚖️ Dynamic Fusion
             """)
     
     def _run_analysis(self):
-        """Execute full forecasting analysis"""
+        """Execute full analysis"""
         if not self.config.api_key:
-            st.warning("⚠️ No OpenAI API key provided. LLM will use fallback logic.")
+            st.warning("⚠️ No API key. LLM will use fallback logic.")
         
         # Load data
         with st.spinner("📊 Loading DOSM data..."):
             cpi_data = self.loader.load_cpi_data(state=self.config.state, start_date=self.config.start_date)
             exog_data = self.loader.load_exogenous_data(start_date=self.config.start_date)
         
-        # Merge datasets
+        # Merge
         full_data = pd.merge(cpi_data, exog_data, on='date', how='outer')
         full_data = full_data.sort_values('date').reset_index(drop=True)
         
-        # Fill missing values
+        # Fill missing
         numeric_cols = ['oil_price', 'usd_myr', 'policy_shock', 'covid_impact']
         full_data[numeric_cols] = full_data[numeric_cols].fillna(method='ffill').fillna(0)
         full_data = full_data.dropna(subset=['index', 'date'])
         
         if full_data.empty:
-            st.error("❌ No valid data available")
+            st.error("❌ No valid data")
             return
         
-        # Display data overview
+        # Display overview
         self._render_data_overview(full_data)
         
         # Prepare data
@@ -1254,137 +1023,78 @@ class TRIFUSIONApp:
         # Initialize framework
         self.framework = TRIFUSIONFramework(self.config)
         
-        # Fit framework
-        with st.spinner("🎯 Training all components..."):
-            # Build context for RAG
+        # Fit
+        with st.spinner("🎯 Training components..."):
             context_docs = [
-                "Malaysia CPI is influenced by oil prices due to fuel subsidies",
+                "Malaysia CPI influenced by oil prices and subsidies",
                 "USD/MYR exchange rate affects import costs",
-                "COVID-19 caused supply chain disruptions in 2020-2021",
-                "SST implementation in September 2018 increased prices",
-                "Fuel subsidy rationalization in June 2022 caused inflation spike"
+                "COVID-19 caused supply chain disruptions 2020-2021",
+                "SST implementation September 2018 increased prices",
+                "Fuel subsidy rationalization June 2022 caused inflation spike"
             ]
-            
             self.framework.fit(y_train, exog_train, context=context_docs)
         
         # Rolling forecast
         with st.spinner("🔮 Generating forecasts..."):
             results = self._rolling_forecast(y_test, exog_test, full_data.iloc[train_size:])
         
-        # Performance analysis
-        self._render_performance_dashboard(results, full_data)
+        # Performance dashboard
+        self._render_performance_dashboard(results)
         
-        # Backtesting
-        if st.checkbox("Run Backtesting", value=False):
-            self._run_backtesting(y, exog)
-        
-        # Export results
+        # Export
         self._render_export_section(results)
     
     def _render_data_overview(self, data: pd.DataFrame):
-        """Render data summary metrics"""
+        """Render data summary"""
         st.markdown("### 📋 Data Overview")
         
         col1, col2, col3, col4 = st.columns(4)
+        with col1: st.metric("Data Points", len(data))
+        with col2: st.metric("CPI Range", f"{data['index'].min():.1f} - {data['index'].max():.1f}")
+        with col3: st.metric("Date Range", f"{data['date'].min().strftime('%Y-%m')} to {data['date'].max().strftime('%Y-%m')}")
+        with col4: st.metric("Missing Values", f"{data['index'].isna().sum()} ({data['index'].isna().mean():.1%})")
         
-        with col1:
-            st.metric("Data Points", len(data))
-        with col2:
-            st.metric("CPI Range", f"{data['index'].min():.1f} - {data['index'].max():.1f}")
-        with col3:
-            st.metric("Date Range", f"{data['date'].min().strftime('%Y-%m')} to {data['date'].max().strftime('%Y-%m')}")
-        with col4:
-            st.metric("Missing Values", f"{data['index'].isna().sum()} ({data['index'].isna().mean():.1%})")
-        
-        # Interactive plot
         fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=data['date'],
-            y=data['index'],
-            mode='lines+markers',
-            name='CPI Index',
-            line=dict(color='#1f77b4', width=2)
-        ))
-        fig.update_layout(
-            title="Consumer Price Index Over Time",
-            xaxis_title="Date",
-            yaxis_title="CPI Index",
-            hovermode='x unified'
-        )
+        fig.add_trace(go.Scatter(x=data['date'], y=data['index'], mode='lines+markers', name='CPI Index'))
+        fig.update_layout(title="Consumer Price Index", xaxis_title="Date", yaxis_title="CPI Index")
         st.plotly_chart(fig, use_container_width=True)
         
-        # Show regime shifts
-        self._highlight_regime_shifts(data)
-    
-    def _highlight_regime_shifts(self, data: pd.DataFrame):
-        """Highlight significant events"""
-        st.markdown("#### 🔔 Identified Regime Shifts")
-        
-        shifts = []
-        
-        # COVID period
+        # Regime shifts
+        st.markdown("#### 🔔 Regime Shifts")
         covid_start = data[(data['date'] >= '2020-03-01') & (data['date'] <= '2020-04-01')]
         if not covid_start.empty:
-            shifts.append({
-                'date': covid_start.iloc[0]['date'],
-                'name': '🦠 COVID-19 Pandemic',
-                'desc': 'Supply chain disruption and demand shock'
-            })
-        
-        # Policy events
-        if 'policy_shock' in data.columns:
-            policy_shocks = data[data['policy_shock'] > 0]
-            for _, row in policy_shocks.iterrows():
-                shifts.append({
-                    'date': row['date'],
-                    'name': '📋 Policy Shock',
-                    'desc': 'Tax or subsidy policy change'
-                })
-        
-        for shift in shifts:
-            st.info(f"**{shift['name']}** ({shift['date'].strftime('%Y-%m')}) - {shift['desc']}")
+            st.info(f"🦠 COVID-19 Pandemic ({covid_start.iloc[0]['date'].strftime('%Y-%m')})")
     
-    def _rolling_forecast(self, y_test: np.ndarray, exog_test: np.ndarray, 
-                         test_data: pd.DataFrame) -> Dict[str, Any]:
-        """Perform rolling window forecast"""
+    def _rolling_forecast(self, y_test: np.ndarray, exog_test: np.ndarray, test_data: pd.DataFrame) -> Dict[str, Any]:
+        """Rolling window forecast"""
         predictions = []
         actuals = []
         weights_history = []
         uncertainties_history = []
-        drift_history = []
         
         progress_bar = st.progress(0)
         
         for i in range(len(y_test) - self.config.forecast_horizon):
-            # Prepare data
-            current_history = self.framework.history[:len(self.framework.history) - len(y_test) + i + 1]
-            current_exog = self.framework.exog_history[:len(self.framework.exog_history) - len(y_test) + i + 1] if self.framework.exog_history is not None else None
+            history_end = len(self.framework.history) - len(y_test) + i + 1
+            current_history = self.framework.history[:history_end]
             
             exog_future = exog_test[i:i+self.config.forecast_horizon]
             future_date = test_data.iloc[i]['date']
-            
-            # Generate context
             context = self._generate_context(future_date)
             
-            # Predict
             result = self.framework.predict(
                 steps=self.config.forecast_horizon, 
                 exog_future=exog_future,
                 context=context
             )
             
-            # Store results
             if i < len(y_test) - self.config.forecast_horizon:
                 predictions.append(result['forecast'][0])
                 actuals.append(y_test[i + 1])
                 weights_history.append(result['weights'])
                 uncertainties_history.append(result['uncertainties'])
-                drift_history.append(result['drift_detected'])
             
-            # Update model with new data
             self.framework.update_with_new_data(y_test[i], exog_test[i] if exog_test is not None else None)
-            
-            # Update progress
             progress_bar.progress((i + 1) / len(y_test))
         
         progress_bar.empty()
@@ -1394,36 +1104,24 @@ class TRIFUSIONApp:
             'actuals': np.array(actuals),
             'weights_history': weights_history,
             'uncertainties_history': uncertainties_history,
-            'drift_history': drift_history,
-            'dates': test_data['date'].values[1:len(predictions)+1],
-            'exog_test': exog_test
+            'dates': test_data['date'].values[1:len(predictions)+1]
         }
     
     def _generate_context(self, date: pd.Timestamp) -> str:
-        """Generate contextual text"""
+        """Generate context"""
         contexts = []
-        
         if pd.Timestamp('2020-03-01') <= date <= pd.Timestamp('2021-12-01'):
-            contexts.append("COVID-19 pandemic ongoing")
-        
+            contexts.append("COVID-19 pandemic")
         if date.month in [11, 12]:
-            contexts.append("Year-end spending surge")
-        
-        if date.year == 2018 and date.month == 9:
-            contexts.append("SST implementation impact")
-        
-        if date.year == 2022 and date.month == 6:
-            contexts.append("Fuel subsidy reform")
-        
-        return " | ".join(contexts) if contexts else "Normal conditions"
+            contexts.append("Year-end spending")
+        return " | ".join(contexts) if contexts else "Normal"
     
-    def _render_performance_dashboard(self, results: Dict[str, Any], full_data: pd.DataFrame):
-        """Render comprehensive performance dashboard"""
+    def _render_performance_dashboard(self, results: Dict[str, Any]):
+        """Render performance dashboard"""
         from sklearn.metrics import mean_absolute_error, mean_squared_error
         
         st.markdown("### 📊 Performance Dashboard")
         
-        # Metrics
         mae = mean_absolute_error(results['actuals'], results['predictions'])
         rmse = np.sqrt(mean_squared_error(results['actuals'], results['predictions']))
         mape = np.mean(np.abs((results['actuals'] - results['predictions']) / results['actuals'])) * 100
@@ -1431,220 +1129,56 @@ class TRIFUSIONApp:
                   np.sum((results['actuals'] - np.mean(results['actuals']))**2))
         
         metrics_cols = st.columns(5)
-        metrics = [
-            ("MAE", f"{mae:.4f}"),
-            ("RMSE", f"{rmse:.4f}"),
-            ("MAPE", f"{mape:.2f}%"),
-            ("R²", f"{r2:.4f}"),
-            ("Observations", len(results['actuals']))
-        ]
-        
+        metrics = [("MAE", f"{mae:.4f}"), ("RMSE", f"{rmse:.4f}"), ("MAPE", f"{mape:.2f}%"), ("R²", f"{r2:.4f}"), ("Observations", len(results['actuals']))]
         for col, (label, value) in zip(metrics_cols, metrics):
-            with col:
-                st.metric(label, value)
+            with col: st.metric(label, value)
         
         # Interactive plot
-        self._render_interactive_plot(results)
-        
-        # Component analysis
-        self._render_component_analysis(results)
-        
-        # Error analysis
-        self._render_error_analysis(results)
-    
-    def _render_interactive_plot(self, results: Dict[str, Any]):
-        """Render interactive forecast vs actual plot"""
         fig = make_subplots(
             rows=3, cols=1,
-            subplot_titles=("Forecast vs Actual", "Model Weights", "Forecast Errors"),
-            vertical_spacing=0.08,
-            row_heights=[0.5, 0.25, 0.25]
+            subplot_titles=("Forecast vs Actual", "Model Weights", "Uncertainties"),
+            vertical_spacing=0.08, row_heights=[0.5, 0.25, 0.25]
         )
         
-        # Forecast vs Actual
         fig.add_trace(
-            go.Scatter(x=results['dates'], y=results['actuals'], 
-                      mode='lines+markers', name='Actual CPI',
-                      line=dict(color='#1f77b4', width=2)),
+            go.Scatter(x=results['dates'], y=results['actuals'], mode='lines+markers', name='Actual CPI'),
             row=1, col=1
         )
         fig.add_trace(
-            go.Scatter(x=results['dates'], y=results['predictions'], 
-                      mode='lines+markers', name='TRIFUSION Forecast',
-                      line=dict(color='#d62728', width=2, dash='dash')),
+            go.Scatter(x=results['dates'], y=results['predictions'], mode='lines+markers', name='TRIFUSION Forecast'),
             row=1, col=1
         )
         
-        # Model weights
         weights_arr = np.array([list(w.values()) for w in results['weights_history']])
-        fig.add_trace(
-            go.Scatter(x=results['dates'], y=weights_arr[:, 0], 
-                      mode='lines', name='Statistical Weight'),
-            row=2, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=results['dates'], y=weights_arr[:, 1], 
-                      mode='lines', name='DL Weight'),
-            row=2, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=results['dates'], y=weights_arr[:, 2], 
-                      mode='lines', name='LLM Weight'),
-            row=2, col=1
-        )
+        for i, name in enumerate(['Statistical', 'Deep Learning', 'LLM']):
+            fig.add_trace(go.Scatter(x=results['dates'], y=weights_arr[:, i], mode='lines', name=name), row=2, col=1)
         
-        # Errors
-        errors = np.abs(results['actuals'] - results['predictions'])
-        fig.add_trace(
-            go.Scatter(x=results['dates'], y=errors, 
-                      mode='lines+markers', name='Absolute Error',
-                      line=dict(color='#9467bd')),
-            row=3, col=1
-        )
+        unc_df = pd.DataFrame(results['uncertainties_history'])
+        for col in unc_df.columns:
+            fig.add_trace(go.Scatter(x=results['dates'], y=unc_df[col], mode='lines', name=col), row=3, col=1)
         
-        fig.update_layout(height=800, showlegend=True)
+        fig.update_layout(height=800)
         st.plotly_chart(fig, use_container_width=True)
     
-    def _render_component_analysis(self, results: Dict[str, Any]):
-        """Analyze component contributions"""
-        st.markdown("#### 🧩 Component Analysis")
-        
-        weights_arr = np.array([list(w.values()) for w in results['weights_history']])
-        avg_weights = weights_arr.mean(axis=0)
-        
-        weight_df = pd.DataFrame({
-            'Component': ['Statistical', 'Deep Learning', 'LLM'],
-            'Avg Weight': avg_weights,
-            'Std Dev': weights_arr.std(axis=0)
-        })
-        
-        # Bar chart of average weights
-        weight_fig = go.Figure(data=[
-            go.Bar(x=weight_df['Component'], y=weight_df['Avg Weight'],
-                   error_y=dict(type='data', array=weight_df['Std Dev']))
-        ])
-        weight_fig.update_layout(title="Average Model Weights", xaxis_title="Component", yaxis_title="Weight")
-        st.plotly_chart(weight_fig, use_container_width=True)
-        
-        # Uncertainty over time
-        unc_df = pd.DataFrame(results['uncertainties_history'])
-        unc_fig = go.Figure()
-        for col in unc_df.columns:
-            unc_fig.add_trace(go.Scatter(x=results['dates'], y=unc_df[col], mode='lines', name=col))
-        unc_fig.update_layout(title="Model Uncertainties Over Time", xaxis_title="Date", yaxis_title="Uncertainty")
-        st.plotly_chart(unc_fig, use_container_width=True)
-    
-    def _render_error_analysis(self, results: Dict[str, Any]):
-        """Analyze forecast errors"""
-        st.markdown("#### 📉 Error Analysis")
-        
-        errors = results['actuals'] - results['predictions']
-        abs_errors = np.abs(errors)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Error distribution
-            fig = go.Figure(data=[go.Histogram(x=errors, nbinsx=30)])
-            fig.update_layout(title="Error Distribution", xaxis_title="Error", yaxis_title="Frequency")
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            # Q-Q plot
-            from scipy import stats
-            theoretical_quantiles = stats.norm.ppf(np.linspace(0.01, 0.99, len(errors)))
-            sample_quantiles = np.quantile(errors, np.linspace(0.01, 0.99, len(errors)))
-            
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=theoretical_quantiles, y=sample_quantiles, mode='markers', name='Q-Q'))
-            fig.add_trace(go.Scatter(x=theoretical_quantiles, y=theoretical_quantiles, mode='lines', name='Ideal'))
-            fig.update_layout(title="Q-Q Plot of Errors", xaxis_title="Theoretical Quantiles", yaxis_title="Sample Quantiles")
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Error statistics
-        error_stats = pd.DataFrame({
-            'Statistic': ['Mean Error', 'MAE', 'RMSE', 'MAPE'],
-            'Value': [np.mean(errors), np.mean(abs_errors), np.sqrt(np.mean(errors**2)), 
-                     np.mean(abs_errors / results['actuals']) * 100]
-        })
-        st.dataframe(error_stats.style.format({'Value': '{:.4f}'}), use_container_width=True)
-    
-    def _run_backtesting(self, y: np.ndarray, exog: np.ndarray):
-        """Run comprehensive backtesting"""
-        st.markdown("### 🔬 Backtesting Results")
-        
-        with st.spinner("Running walk-forward validation..."):
-            backtest_results = self.framework.backtest(n_splits=3)
-        
-        if backtest_results is not None:
-            # Show fold performance
-            fold_metrics = backtest_results.groupby('fold').agg({
-                'abs_error': ['mean', 'std'],
-                'error': ['mean', 'std']
-            })
-            
-            st.dataframe(fold_metrics, use_container_width=True)
-            
-            # Download backtest results
-            csv = backtest_results.to_csv(index=False)
-            st.download_button(
-                label="📥 Download Backtest Results",
-                data=csv,
-                file_name=f"trifusion_backtest_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv"
-            )
-    
     def _render_export_section(self, results: Dict[str, Any]):
-        """Render export options"""
+        """Export results"""
         st.markdown("### 💾 Export Results")
         
-        # Prepare results DataFrame
         export_df = pd.DataFrame({
             'date': results['dates'],
             'actual_cpi': results['actuals'],
             'forecast_cpi': results['predictions']
         })
         
-        # Add components if available
-        if 'components' in results:
-            for component, values in results['components'].items():
-                if len(values) >= len(results['dates']):
-                    export_df[f'{component}_forecast'] = values[:len(results['dates'])]
-        
-        # CSV Export
         csv = export_df.to_csv(index=False)
-        b64 = base64.b64encode(csv.encode()).decode()
-        href = f'<a href="data:file/csv;base64,{b64}" download="trifusion_forecast_{datetime.now().strftime("%Y%m%d")}.csv">📥 Download Forecast (CSV)</a>'
-        st.markdown(href, unsafe_allow_html=True)
-        
-        # JSON Export
-        json_export = {
-            'metadata': {
-                'timestamp': datetime.now().isoformat(),
-                'state': self.config.state if hasattr(self.config, 'state') else 'Unknown',
-                'configuration': self.config.__dict__
-            },
-            'results': {
-                'dates': [d.isoformat() for d in results['dates']],
-                'actuals': results['actuals'].tolist(),
-                'predictions': results['predictions'].tolist(),
-                'weights': [list(w.values()) for w in results['weights_history']],
-                'uncertainties': results['uncertainties_history']
-            },
-            'metrics': {
-                'mae': float(np.mean(np.abs(results['actuals'] - results['predictions']))),
-                'rmse': float(np.sqrt(np.mean((results['actuals'] - results['predictions'])**2))),
-                'mape': float(np.mean(np.abs((results['actuals'] - results['predictions']) / results['actuals']) * 100))
-            }
-        }
-        
-        json_str = json.dumps(json_export, indent=2)
-        b64_json = base64.b64encode(json_str.encode()).decode()
-        href_json = f'<a href="data:file/json;base64,{b64_json}" download="trifusion_full_results_{datetime.now().strftime("%Y%m%d")}.json">📥 Download Full Results (JSON)</a>'
-        st.markdown(href_json, unsafe_allow_html=True)
+        st.download_button(
+            label="📥 Download Forecast (CSV)",
+            data=csv,
+            file_name=f"trifusion_forecast_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv"
+        )
 
 def main():
-    """Main application entry point"""
     app = TRIFUSIONApp()
     app.run()
 
