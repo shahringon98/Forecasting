@@ -541,7 +541,6 @@ class TRIFUSIONApp:
             self.config = ForecastConfig(
                 lookback=lookback,
                 epochs=epochs,
-                learning_rate=lr,
                 api_key=api_key or None,
                 use_rag=use_rag,
                 uncertainty_weighting=uncertainty_weighting,
@@ -935,3 +934,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
