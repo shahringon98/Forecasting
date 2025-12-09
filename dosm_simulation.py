@@ -14,7 +14,7 @@ warnings.filterwarnings('ignore')
 
 # =============================================================================
 # TRIFUSION FORECASTING FRAMEWORK v3.2
-# Python 3.13 & Streamlit Cloud Compatible
+# Python 3.13 & Streamlit Cloud Compatible - Complete Implementation
 # =============================================================================
 
 @dataclass
@@ -34,6 +34,7 @@ class ForecastConfig:
     alpha: float = 2.5
     guardrail_threshold: float = 0.4
     uncertainty_weighting: bool = True
+    state: Optional[str] = None  # ✅ ADDED: Store selected state
     
     def validate(self):
         assert self.lookback > 0, "Lookback must be positive"
@@ -99,7 +100,6 @@ class DeepLearningForecaster:
                 steps: int = 1, uncertainty_quantification: bool = False) -> np.ndarray:
         """
         Fallback: Simple trend extrapolation with seasonal adjustment
-        This replaces the PyTorch model with pure Python logic
         """
         if len(y) == 0:
             return np.full(steps, 0)
@@ -296,7 +296,7 @@ class TRIFUSIONFramework:
     def __init__(self, config: ForecastConfig):
         self.config = config
         self.statistical = StatisticalForecaster(config)
-        self.deep_learning = DeepLearningForecaster(config)  # Now pure Python fallback
+        self.deep_learning = DeepLearningForecaster(config)
         self.rag = RAGPipeline(config)
         self.llm = LLMForecaster(config, self.rag)
         self.meta_controller = MetaController(config)
@@ -312,7 +312,7 @@ class TRIFUSIONFramework:
             self.statistical.fit(y, exog)
         
         with st.spinner("🧠 Training Deep Learning Model..."):
-            self.deep_learning.fit(y, exog)  # Now instant
+            self.deep_learning.fit(y, exog)
         
         if context and self.config.use_rag:
             with st.spinner("📚 Building RAG Corpus..."):
@@ -334,7 +334,7 @@ class TRIFUSIONFramework:
         
         uncertainties = {
             'statistical': 0.1,
-            'deep_learning': 0.1,  # Fixed uncertainty for fallback
+            'deep_learning': 0.1,
             'llm': 1.0 - confidence
         }
         
@@ -410,25 +410,20 @@ class DOSMDataLoader:
         """Generate realistic synthetic CPI data"""
         dates = pd.date_range(start=start_date, end=pd.Timestamp.now(), freq='M')
         
-        # Realistic CPI generation with trends and breaks
         base_cpi = 100
         values = []
         
         for i, date in enumerate(dates):
-            # Long-term trend
             trend = 1 + (date.year - 2015) * 0.015 + i * 0.0003
-            
-            # Seasonality
             seasonal = 1 + 0.02 * np.sin(2 * np.pi * date.month / 12)
             
-            # Structural breaks
             breaks = 1.0
             if pd.Timestamp('2018-09-01') <= date <= pd.Timestamp('2018-12-01'):
-                breaks *= 1.02  # SST
+                breaks *= 1.02
             if pd.Timestamp('2020-03-01') <= date <= pd.Timestamp('2021-06-01'):
-                breaks *= 1.04  # COVID
+                breaks *= 1.04
             if pd.Timestamp('2022-06-01') <= date <= pd.Timestamp('2022-09-01'):
-                breaks *= 1.03  # Subsidy reform
+                breaks *= 1.03
             
             noise = np.random.normal(0, 0.25)
             cpi = base_cpi * trend * seasonal * breaks + noise
@@ -443,19 +438,15 @@ class DOSMDataLoader:
         
         data = []
         for date in dates:
-            # Oil price: realistic fluctuations
             oil_trend = 60 + (date.year - 2020) * 2
             oil_cycle = 15 * np.sin(2 * np.pi * date.year / 3)
             oil_price = max(40, min(120, oil_trend + oil_cycle + np.random.normal(0, 5)))
             
-            # USD/MYR: realistic exchange rate
             usd_myr_trend = 4.2 + 0.1 * np.sin(2 * np.pi * date.year / 5)
             usd_myr = max(3.8, min(4.8, usd_myr_trend + np.random.normal(0, 0.08)))
             
-            # Policy shocks (binary events)
             policy_shock = 1.0 if date in [pd.Timestamp('2018-09-01'), pd.Timestamp('2022-06-01')] else 0.0
             
-            # COVID impact (graduated)
             if pd.Timestamp('2020-03-01') <= date <= pd.Timestamp('2021-03-01'):
                 covid_impact = 1.5
             elif pd.Timestamp('2021-04-01') <= date <= pd.Timestamp('2021-12-01'):
@@ -528,7 +519,6 @@ class TRIFUSIONApp:
             st.header("⚙️ Configuration")
             
             st.subheader("Model Architecture")
-            # Deep learning option disabled for compatibility
             st.info("Deep Learning: **Fallback Mode** (PyTorch-free)")
             
             st.subheader("Hyperparameters")
@@ -547,13 +537,15 @@ class TRIFUSIONApp:
             st.subheader("Advanced")
             uncertainty_weighting = st.checkbox("Uncertainty Weighting", value=True)
             
+            # ✅ CORRECTED: Pass state to ForecastConfig
             self.config = ForecastConfig(
                 lookback=lookback,
                 epochs=epochs,
                 learning_rate=lr,
                 api_key=api_key or None,
                 use_rag=use_rag,
-                uncertainty_weighting=uncertainty_weighting
+                uncertainty_weighting=uncertainty_weighting,
+                state=state  # ✅ ADD THIS
             )
             
             st.markdown("---")
@@ -898,18 +890,15 @@ class TRIFUSIONApp:
             'forecast_cpi': results['predictions']
         })
         
-        # Add components if available
-        if 'components' in results:
-            for component, values in results['components'].items():
-                if len(values) >= len(results['dates']):
-                    export_df[f'{component}_forecast'] = values[:len(results['dates'])]
+        # ✅ CORRECTED: Safely access state attribute
+        state_name = getattr(self.config, 'state', 'Unknown')
         
         # CSV Export
         csv = export_df.to_csv(index=False)
         st.download_button(
             label="📥 Download Forecast (CSV)",
             data=csv,
-            file_name=f"trifusion_forecast_{self.config.state}_{datetime.now().strftime('%Y%m%d')}.csv",
+            file_name=f"trifusion_forecast_{state_name}_{datetime.now().strftime('%Y%m%d')}.csv",
             mime="text/csv"
         )
         
@@ -917,7 +906,7 @@ class TRIFUSIONApp:
         json_export = {
             'metadata': {
                 'timestamp': datetime.now().isoformat(),
-                'state': self.config.state,
+                'state': state_name,
                 'configuration': self.config.__dict__
             },
             'results': {
@@ -937,7 +926,7 @@ class TRIFUSIONApp:
         json_str = json.dumps(json_export, indent=2)
         b64_json = base64.b64encode(json_str.encode()).decode()
         href = f'<a href="data:file/json;base64,{b64_json}" download="trifusion_full_results_{datetime.now().strftime("%Y%m%d")}.json">📥 Download Full Results (JSON)</a>'
-        st.plotly_chart(fig, use_container_width=True)
+        st.markdown(href, unsafe_allow_html=True)
 
 def main():
     """Application entry point"""
