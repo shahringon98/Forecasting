@@ -374,9 +374,14 @@ class DOSMDataLoader:
         self.base_url = "https://storage.dosm.gov.my"
         self.datasets = {"cpi_state": "/timeseries/cpi/cpi_2d_state.parquet"}
     
-    @st.cache_data(ttl=3600)
+    # ✅ FIX: Remove caching decorator from this method
     def load_cpi_data(self, state: str = "Malaysia", start_date: str = "2015-01-01") -> pd.DataFrame:
-        """Load CPI data with caching"""
+        """Load CPI data - caching handled internally"""
+        return self._load_cpi_data_internal(state, start_date)
+    
+    @st.cache_data(ttl=3600)
+    def _load_cpi_data_internal(self, state: str, start_date: str) -> pd.DataFrame:
+        """Internal cached method with simple parameters"""
         try:
             url = f"{self.base_url}{self.datasets['cpi_state']}"
             df = pd.read_parquet(url)
@@ -391,8 +396,9 @@ class DOSMDataLoader:
             else:
                 df_filtered = df
             
+            # ✅ Use pd.Timestamp for comparison (not datetime.date)
             df_filtered = df_filtered[
-                (df_filtered['date'] >= pd.to_datetime(start_date)) &
+                (df_filtered['date'] >= pd.Timestamp(start_date)) &
                 (df_filtered['date'] <= pd.Timestamp.now())
             ].sort_values('date').reset_index(drop=True)
             
@@ -405,6 +411,44 @@ class DOSMDataLoader:
         except Exception as e:
             st.error(f"❌ Failed to load DOSM data: {str(e)}")
             return self._generate_synthetic_cpi(state, start_date)
+    
+    # ✅ FIX: Also remove caching from this method
+    def load_exogenous_data(self, start_date: str = "2015-01-01") -> pd.DataFrame:
+        """Generate synthetic exogenous variables"""
+        return self._load_exogenous_data_internal(start_date)
+    
+    @st.cache_data
+    def _load_exogenous_data_internal(self, start_date: str) -> pd.DataFrame:
+        """Internal cached method with simple parameters"""
+        dates = pd.date_range(start=start_date, end=pd.Timestamp.now(), freq='M')
+        
+        data = []
+        for date in dates:
+            oil_trend = 60 + (date.year - 2020) * 2
+            oil_cycle = 15 * np.sin(2 * np.pi * date.year / 3)
+            oil_price = max(40, min(120, oil_trend + oil_cycle + np.random.normal(0, 5)))
+            
+            usd_myr_trend = 4.2 + 0.1 * np.sin(2 * np.pi * date.year / 5)
+            usd_myr = max(3.8, min(4.8, usd_myr_trend + np.random.normal(0, 0.08)))
+            
+            policy_shock = 1.0 if date in [pd.Timestamp('2018-09-01'), pd.Timestamp('2022-06-01')] else 0.0
+            
+            if pd.Timestamp('2020-03-01') <= date <= pd.Timestamp('2021-03-01'):
+                covid_impact = 1.5
+            elif pd.Timestamp('2021-04-01') <= date <= pd.Timestamp('2021-12-01'):
+                covid_impact = 1.2
+            else:
+                covid_impact = 0.0
+            
+            data.append({
+                'date': date,
+                'oil_price': oil_price,
+                'usd_myr': usd_myr,
+                'policy_shock': policy_shock,
+                'covid_impact': covid_impact
+            })
+        
+        return pd.DataFrame(data)
     
     def _generate_synthetic_cpi(self, state: str, start_date: str) -> pd.DataFrame:
         """Generate realistic synthetic CPI data"""
@@ -934,4 +978,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
